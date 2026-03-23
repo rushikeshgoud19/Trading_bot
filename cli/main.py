@@ -26,9 +26,14 @@ from rich.rule import Rule
 from tradingagents.graph.trading_graph import TradingAgentsGraph
 from tradingagents.default_config import DEFAULT_CONFIG
 from cli.models import AnalystType
-from cli.utils import *
+from cli.utils import (
+    select_analysts, select_research_depth, select_llm_provider,
+    select_shallow_thinking_agent, select_deep_thinking_agent,
+    ask_gemini_thinking_config, ask_openai_reasoning_effort, ask_anthropic_effort
+)
 from cli.announcements import fetch_announcements, display_announcements
 from cli.stats_handler import StatsCallbackHandler
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 console = Console()
 
@@ -71,15 +76,15 @@ class MessageBuffer:
     }
 
     def __init__(self, max_length=100):
-        self.messages = deque(maxlen=max_length)
-        self.tool_calls = deque(maxlen=max_length)
-        self.current_report = None
-        self.final_report = None  # Store the complete final report
-        self.agent_status = {}
-        self.current_agent = None
-        self.report_sections = {}
-        self.selected_analysts = []
-        self._last_message_id = None
+        self.messages: deque = deque(maxlen=max_length)
+        self.tool_calls: deque = deque(maxlen=max_length)
+        self.current_report: Optional[str] = None
+        self.final_report: Optional[str] = None  # Store the complete final report
+        self.agent_status: dict[str, str] = {}
+        self.current_agent: Optional[str] = None
+        self.report_sections: dict[str, Optional[str]] = {}
+        self.selected_analysts: list[str] = []
+        self._last_message_id: Optional[str] = None
 
     def init_for_analysis(self, selected_analysts):
         """Initialize agent status and report sections based on selected analysts.
@@ -294,9 +299,9 @@ def update_display(layout, spinner_text=None, stats_handler=None, start_time=Non
     }
 
     # Filter teams to only include agents that are in agent_status
-    teams = {}
+    teams: dict[str, list[str]] = {}
     for team, agents in all_teams.items():
-        active_agents = [a for a in agents if a in message_buffer.agent_status]
+        active_agents: list[str] = [a for a in agents if a in message_buffer.agent_status]
         if active_agents:
             teams[team] = active_agents
 
@@ -319,7 +324,7 @@ def update_display(layout, spinner_text=None, stats_handler=None, start_time=Non
         progress_table.add_row(team, first_agent, status_cell)
 
         # Add remaining agents in team
-        for agent in agents[1:]:
+        for agent in agents[1:]: # type: ignore
             status = message_buffer.agent_status.get(agent, "pending")
             if status == "in_progress":
                 spinner = Spinner(
@@ -359,7 +364,7 @@ def update_display(layout, spinner_text=None, stats_handler=None, start_time=Non
     )  # Make content column expand
 
     # Combine tool calls and messages
-    all_messages = []
+    all_messages: list[tuple[str, str, str]] = []
 
     # Add tool calls
     for timestamp, tool_name, args in message_buffer.tool_calls:
@@ -370,7 +375,7 @@ def update_display(layout, spinner_text=None, stats_handler=None, start_time=Non
     for timestamp, msg_type, content in message_buffer.messages:
         content_str = str(content) if content else ""
         if len(content_str) > 200:
-            content_str = content_str[:197] + "..."
+            content_str = content_str[:197] + "..." # type: ignore
         all_messages.append((timestamp, msg_type, content_str))
 
     # Sort by timestamp descending (newest first)
@@ -380,7 +385,7 @@ def update_display(layout, spinner_text=None, stats_handler=None, start_time=Non
     max_messages = 12
 
     # Get the first N messages (newest ones)
-    recent_messages = all_messages[:max_messages]
+    recent_messages = all_messages[:max_messages] # type: ignore
 
     # Add messages to table (already in newest-first order)
     for timestamp, msg_type, content in recent_messages:
@@ -889,7 +894,6 @@ def classify_message_type(message) -> tuple[str, str | None]:
         (type, content) - type is one of: User, Agent, Data, Control
                         - content is extracted string or None
     """
-    from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
     content = extract_content_string(getattr(message, 'content', None))
 
@@ -926,7 +930,10 @@ def run_analysis():
     config["quick_think_llm"] = selections["shallow_thinker"]
     config["deep_think_llm"] = selections["deep_thinker"]
     config["backend_url"] = selections["backend_url"]
-    config["llm_provider"] = selections["llm_provider"].lower()
+    
+    provider_val: str = str(selections.get("llm_provider") or "openai")
+    config["llm_provider"] = provider_val.lower()
+    
     # Provider-specific thinking configuration
     config["google_thinking_level"] = selections.get("google_thinking_level")
     config["openai_reasoning_effort"] = selections.get("openai_reasoning_effort")
@@ -936,7 +943,7 @@ def run_analysis():
     stats_handler = StatsCallbackHandler()
 
     # Normalize analyst selection to predefined order (selection is a 'set', order is fixed)
-    selected_set = {analyst.value for analyst in selections["analysts"]}
+    selected_set = {getattr(a, "value", str(a)) for a in selections["analysts"]} # type: ignore
     selected_analyst_keys = [a for a in ANALYST_ORDER if a in selected_set]
 
     # Initialize the graph with callbacks bound to LLMs
@@ -953,8 +960,11 @@ def run_analysis():
     # Track start time for elapsed display
     start_time = time.time()
 
+    ticker_val: str = str(selections.get("ticker") or "SPY")
+    date_val: str = str(selections.get("analysis_date") or "2024-01-01")
+
     # Create result directory
-    results_dir = Path(config["results_dir"]) / selections["ticker"] / selections["analysis_date"]
+    results_dir = Path(config["results_dir"]) / ticker_val / date_val
     results_dir.mkdir(parents=True, exist_ok=True)
     report_dir = results_dir / "reports"
     report_dir.mkdir(parents=True, exist_ok=True)
@@ -997,9 +1007,9 @@ def run_analysis():
                         f.write(text)
         return wrapper
 
-    message_buffer.add_message = save_message_decorator(message_buffer, "add_message")
-    message_buffer.add_tool_call = save_tool_call_decorator(message_buffer, "add_tool_call")
-    message_buffer.update_report_section = save_report_section_decorator(message_buffer, "update_report_section")
+    message_buffer.add_message = save_message_decorator(message_buffer, "add_message") # type: ignore
+    message_buffer.add_tool_call = save_tool_call_decorator(message_buffer, "add_tool_call") # type: ignore
+    message_buffer.update_report_section = save_report_section_decorator(message_buffer, "update_report_section") # type: ignore
 
     # Now start the display layout
     layout = create_layout()
@@ -1015,12 +1025,12 @@ def run_analysis():
         )
         message_buffer.add_message(
             "System",
-            f"Selected analysts: {', '.join(analyst.value for analyst in selections['analysts'])}",
+            f"Selected analysts: {', '.join(getattr(a, 'value', str(a)) for a in selections['analysts'])}", # type: ignore
         )
         update_display(layout, stats_handler=stats_handler, start_time=start_time)
 
         # Update agent status to in_progress for the first analyst
-        first_analyst = f"{selections['analysts'][0].value.capitalize()} Analyst"
+        first_analyst = f"{getattr(selections['analysts'][0], 'value', str(selections['analysts'][0])).capitalize()} Analyst" # type: ignore
         message_buffer.update_agent_status(first_analyst, "in_progress")
         update_display(layout, stats_handler=stats_handler, start_time=start_time)
 
@@ -1176,7 +1186,7 @@ def run_analysis():
         ).strip()
         save_path = Path(save_path_str)
         try:
-            report_file = save_report_to_disk(final_state, selections["ticker"], save_path)
+            report_file = save_report_to_disk(final_state, str(selections.get("ticker", "SPY")), save_path)
             console.print(f"\n[green]✓ Report saved to:[/green] {save_path.resolve()}")
             console.print(f"  [dim]Complete report:[/dim] {report_file.name}")
         except Exception as e:
